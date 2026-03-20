@@ -331,11 +331,6 @@ export class WeChatSDK extends EventEmitter {
     const mode = this.selectMode();
     this.logger.info('创建通道', { mode });
 
-    // TODO: 根据mode创建具体的通道实例
-    // 这里需要导入QClawChannel和WorkBuddyChannel
-    // import { QClawChannel } from './channels/qclaw/client.js';
-    // import { WorkBuddyChannel } from './channels/workbuddy/client.js';
-
     if (mode === 'qclaw') {
       return this.createQClawChannel();
     } else if (mode === 'workbuddy') {
