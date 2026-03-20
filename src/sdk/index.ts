@@ -36,6 +36,12 @@ import { Storage } from './utils/storage.js';
 const SESSION_KEY = 'session';
 
 /**
+ * Key used when persisting device-level info (guid) separately from auth tokens.
+ * Mirrors the oicq pattern: device.json never expires; session.json may be cleared on re-login.
+ */
+const DEVICE_KEY = 'device';
+
+/**
  * WeChat 通信SDK
  * 
  * 统一的微信通信接口，同时支持QClaw和WorkBuddy两种通信方式。
@@ -105,6 +111,13 @@ export class WeChatSDK extends EventEmitter {
       // 验证凭证
       if (!this.config.credentials) {
         throw new ConfigurationError('缺少凭证配置，且未找到本地会话文件');
+      }
+
+      // QClaw 模式：确保设备 GUID 存在（参考 oicq 的 device.json 模式）
+      if ((this.config.credentials as QClawCredentials).mode === 'qclaw') {
+        this.config.credentials = await this.ensureDeviceInfo(
+          this.config.credentials as QClawCredentials,
+        );
       }
 
       // 创建通道
@@ -297,10 +310,35 @@ export class WeChatSDK extends EventEmitter {
    * 清除本地保存的会话凭证
    * 
    * 调用此方法后，下次启动时需要重新提供凭证。
+   * 注意：设备 GUID（device.json）不会被清除，如需清除请调用 clearDevice()。
    */
   async clearSession(): Promise<void> {
     await this.storage.delete(SESSION_KEY);
     this.logger.info('本地会话凭证已清除');
+  }
+
+  // ────────────── 设备管理（QClaw） ──────────────
+
+  /**
+   * 检查是否存在本地持久化的设备信息（device.json）
+   * 
+   * QClaw 模式专用。设备 GUID 与会话凭证分开存储：
+   * - device.json：设备 GUID，首次生成后永久保存，clearSession() 不会清除它
+   * - session.json：登录凭证（channelToken/jwtToken），可能过期，clearSession() 会清除
+   */
+  async hasSavedDevice(): Promise<boolean> {
+    return this.storage.exists(DEVICE_KEY);
+  }
+
+  /**
+   * 清除本地保存的设备信息（device.json）
+   * 
+   * 调用后下次 QClaw 连接时会生成新的设备 GUID（相当于换了一台设备）。
+   * 通常不需要调用此方法，除非需要重置设备标识。
+   */
+  async clearDevice(): Promise<void> {
+    await this.storage.delete(DEVICE_KEY);
+    this.logger.info('本地设备信息已清除');
   }
 
   // ────────────── 事件方法 ──────────────
@@ -463,8 +501,8 @@ export class WeChatSDK extends EventEmitter {
 
     // 根据凭证特征推断模式
     const creds = this.config.credentials;
-    if ('channelToken' in creds && 'guid' in creds) {
-      this.logger.debug('自动选择: QClaw模式（检测到channelToken和guid）');
+    if ('channelToken' in creds && 'jwtToken' in creds) {
+      this.logger.debug('自动选择: QClaw模式（检测到channelToken和jwtToken）');
       return 'qclaw';
     } else if ('accessToken' in creds && 'userId' in creds) {
       this.logger.debug('自动选择: WorkBuddy模式（检测到accessToken和userId）');
@@ -479,6 +517,48 @@ export class WeChatSDK extends EventEmitter {
    */
   private setupEventForwarding(): void {
     // Channel events are forwarded via setupChannelEvents() when a channel is created
+  }
+
+  /**
+   * 确保 QClaw 凭证中包含设备 GUID（oicq device.json 模式）
+   * 
+   * 处理逻辑：
+   * 1. 若凭证中已有 guid，持久化到 device.json 后直接使用（迁移已有设备 ID 的场景）
+   * 2. 若没有 guid，尝试从 device.json 加载（二次启动场景）
+   * 3. 若 device.json 也没有，自动生成一个新 UUID 并保存（首次启动场景）
+   * 
+   * device.json 与 session.json 分开存储：
+   * - device.json：设备标识，永久保存，clearSession() 不会清除
+   * - session.json：登录凭证，可能过期，clearSession() 会清除
+   */
+  private async ensureDeviceInfo(
+    creds: QClawCredentials,
+  ): Promise<QClawCredentials & { guid: string }> {
+    if (creds.guid) {
+      // guid 已提供 —— 将其持久化，保持 device.json 与运行时一致
+      if (this.config.storage.enablePersist) {
+        await this.storage.save(DEVICE_KEY, { guid: creds.guid });
+      }
+      return creds as QClawCredentials & { guid: string };
+    }
+
+    // 从 device.json 恢复（二次启动）
+    if (this.config.storage.enablePersist) {
+      const device = await this.storage.load<{ guid: string }>(DEVICE_KEY);
+      if (device?.guid) {
+        this.logger.info('从设备文件恢复 GUID', { guid: device.guid });
+        return { ...creds, guid: device.guid };
+      }
+    }
+
+    // 首次启动：自动生成并保存 GUID
+    const { randomUUID } = await import('crypto');
+    const guid = randomUUID();
+    this.logger.info('首次运行，自动生成设备 GUID', { guid });
+    if (this.config.storage.enablePersist) {
+      await this.storage.save(DEVICE_KEY, { guid });
+    }
+    return { ...creds, guid };
   }
 
   /**

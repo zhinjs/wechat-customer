@@ -178,8 +178,14 @@ export type ChannelCredentials = QClawCredentials | WorkBuddyCredentials;
 export interface QClawCredentials {
   mode: 'qclaw';
   
-  /** 设备GUID */
-  guid: string;
+  /**
+   * 设备GUID（可选）
+   * 
+   * 无需手动提供——SDK 会在首次连接时自动生成一个 UUID 并持久化到
+   * `~/.wechat-sdk/device.json`，后续启动自动加载，行为与 oicq 的 device.json 一致。
+   * 仅在需要迁移已有设备标识时才需要显式传入。
+   */
+  guid?: string;
   
   /** 渠道Token */
   channelToken: string;

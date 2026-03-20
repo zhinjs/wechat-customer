@@ -93,7 +93,7 @@ export class QClawChannel extends Channel {
     const payload = {
       type: 'message',
       toUser: request.to,
-      fromUser: creds.userId ?? creds.guid,
+      fromUser: creds.userId ?? creds.guid!,
       content: request.content,
       msgId,
       timestamp: Date.now(),
@@ -162,13 +162,13 @@ export class QClawChannel extends Channel {
       const message: Message = MessageAdapter.agpToMessage(
         {
           fromUser: msg.fromUser,
-          toUser: msg.toUser ?? creds.userId ?? creds.guid,
+          toUser: msg.toUser ?? creds.userId ?? creds.guid!,
           content: msg.content,
           msgId: msg.msgId,
           timestamp: msg.timestamp,
           msgType: 'text',
         },
-        creds.userId ?? creds.guid,
+        creds.userId ?? creds.guid!,
       );
       this.dispatchMessage(message);
     }

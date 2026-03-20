@@ -126,10 +126,10 @@ const sdk = new WeChatSDK({
   mode: 'qclaw',
   credentials: {
     mode: 'qclaw',           // ← 固定值
-    guid: 'device_guid',     // 设备唯一标识，首次生成后固定（crypto.randomUUID()）
     channelToken: '...',     // 扫码/JPRX 鉴权后获得
     jwtToken: '...',         // 与 channelToken 同步返回
     userId: '...',           // 可选，用户 ID
+    // guid 无需提供——SDK 自动生成并保存到 ~/.wechat-sdk/device.json（oicq 模式）
   },
 });
 ```

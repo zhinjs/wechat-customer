@@ -3,7 +3,7 @@ import { QClawCredentials, WorkBuddyCredentials, ConnectionState } from '../sdk/
 
 // Mock the channel implementations
 jest.mock('../sdk/channels/qclaw/client', () => ({
-  QClawChannel: jest.fn().mockImplementation(() => ({
+  QClawChannel: jest.fn().mockImplementation((creds) => ({
     on: jest.fn().mockReturnThis(),
     connect: jest.fn().mockResolvedValue(undefined),
     disconnect: jest.fn().mockResolvedValue(undefined),
@@ -11,7 +11,7 @@ jest.mock('../sdk/channels/qclaw/client', () => ({
     getState: jest.fn().mockReturnValue(ConnectionState.CONNECTED),
     sendMessage: jest.fn().mockResolvedValue({ success: true, messageId: 'test-id', timestamp: Date.now() }),
     refreshCredentials: jest.fn().mockResolvedValue(undefined),
-    getCredentials: jest.fn().mockReturnValue({ mode: 'qclaw', guid: 'test', channelToken: 'token', jwtToken: 'jwt' }),
+    getCredentials: jest.fn().mockReturnValue(creds),
     emit: jest.fn(),
     removeAllListeners: jest.fn(),
   })),
@@ -246,6 +246,135 @@ describe('WeChatSDK', () => {
       await sdk.refreshCredentials();
       const saved = await sdk.loadSavedCredentials();
       expect(saved).not.toBeNull();
+      await sdk.disconnect();
+    });
+  });
+
+  describe('device guid management (oicq pattern)', () => {
+    let tmpDir: string;
+
+    beforeEach(async () => {
+      const os = await import('os');
+      const path = await import('path');
+      const fs = await import('fs/promises');
+      tmpDir = path.join(os.default.tmpdir(), `wechat-sdk-device-test-${Date.now()}`);
+      await fs.mkdir(tmpDir, { recursive: true });
+    });
+
+    afterEach(async () => {
+      const fs = await import('fs/promises');
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it('hasSavedDevice returns false before first connect', async () => {
+      const sdk = new WeChatSDK({ storage: { dir: tmpDir, enablePersist: true } });
+      expect(await sdk.hasSavedDevice()).toBe(false);
+    });
+
+    it('auto-generates guid on first connect when not provided', async () => {
+      const credsWithoutGuid: QClawCredentials = {
+        mode: 'qclaw',
+        channelToken: 'test-token',
+        jwtToken: 'test-jwt',
+        // no guid
+      };
+      const sdk = new WeChatSDK({
+        mode: 'qclaw',
+        credentials: credsWithoutGuid,
+        storage: { dir: tmpDir, enablePersist: true },
+      });
+      await sdk.connect();
+      // device.json should now exist with a generated guid
+      expect(await sdk.hasSavedDevice()).toBe(true);
+      await sdk.disconnect();
+    });
+
+    it('reuses the same guid on subsequent connects', async () => {
+      const credsWithoutGuid: QClawCredentials = {
+        mode: 'qclaw',
+        channelToken: 'test-token',
+        jwtToken: 'test-jwt',
+      };
+
+      // First connect – guid is generated
+      const sdk1 = new WeChatSDK({
+        mode: 'qclaw',
+        credentials: credsWithoutGuid,
+        storage: { dir: tmpDir, enablePersist: true },
+      });
+      await sdk1.connect();
+      const creds1 = sdk1.getCredentials() as QClawCredentials;
+      const generatedGuid = creds1.guid;
+      expect(generatedGuid).toBeDefined();
+      await sdk1.disconnect();
+
+      // Second connect – same guid should be restored from device.json
+      const sdk2 = new WeChatSDK({
+        mode: 'qclaw',
+        credentials: credsWithoutGuid,
+        storage: { dir: tmpDir, enablePersist: true },
+      });
+      await sdk2.connect();
+      const creds2 = sdk2.getCredentials() as QClawCredentials;
+      expect(creds2.guid).toBe(generatedGuid);
+      await sdk2.disconnect();
+    });
+
+    it('uses provided guid and persists it to device.json', async () => {
+      const sdk = new WeChatSDK({
+        mode: 'qclaw',
+        credentials: qclawCreds, // qclawCreds has guid: 'test-guid'
+        storage: { dir: tmpDir, enablePersist: true },
+      });
+      await sdk.connect();
+      expect(await sdk.hasSavedDevice()).toBe(true);
+      const creds = sdk.getCredentials() as QClawCredentials;
+      expect(creds.guid).toBe('test-guid');
+      await sdk.disconnect();
+    });
+
+    it('clearDevice removes the device.json but not session.json', async () => {
+      const sdk = new WeChatSDK({
+        mode: 'qclaw',
+        credentials: qclawCreds,
+        storage: { dir: tmpDir, enablePersist: true },
+      });
+      await sdk.connect();
+      expect(await sdk.hasSavedDevice()).toBe(true);
+      expect(await sdk.hasSavedSession()).toBe(true);
+
+      await sdk.clearDevice();
+      expect(await sdk.hasSavedDevice()).toBe(false);
+      // clearDevice() does NOT touch session.json
+      expect(await sdk.hasSavedSession()).toBe(true);
+      await sdk.disconnect();
+    });
+
+    it('clearSession does NOT remove device.json', async () => {
+      const sdk = new WeChatSDK({
+        mode: 'qclaw',
+        credentials: qclawCreds,
+        storage: { dir: tmpDir, enablePersist: true },
+      });
+      await sdk.connect();
+      await sdk.clearSession();
+      // device.json should still be there after clearing the session
+      expect(await sdk.hasSavedDevice()).toBe(true);
+    });
+
+    it('does not persist device when enablePersist=false', async () => {
+      const credsWithoutGuid: QClawCredentials = {
+        mode: 'qclaw',
+        channelToken: 'test-token',
+        jwtToken: 'test-jwt',
+      };
+      const sdk = new WeChatSDK({
+        mode: 'qclaw',
+        credentials: credsWithoutGuid,
+        storage: { dir: tmpDir, enablePersist: false },
+      });
+      await sdk.connect();
+      expect(await sdk.hasSavedDevice()).toBe(false);
       await sdk.disconnect();
     });
   });

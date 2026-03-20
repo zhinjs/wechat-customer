@@ -6,7 +6,7 @@ export class QClawAuth {
     return {
       type: 'auth',
       channelToken: credentials.channelToken,
-      guid: credentials.guid,
+      guid: credentials.guid!,  // guaranteed to be set by WeChatSDK.ensureDeviceInfo() before connect
       jwtToken: credentials.jwtToken,
     };
   }
