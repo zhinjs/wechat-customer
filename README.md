@@ -83,21 +83,24 @@ yarn add @myorg/wechat-sdk
 ### 2. 基础使用
 
 ```typescript
-import { WeChatSDK } from '@myorg/wechat-sdk';
+import { WeChatSDK, LoginRequiredError } from '@myorg/wechat-sdk';
 
-// 首次启动：提供凭证，连接成功后自动保存到 ~/.wechat-sdk/session.json
+// mode 是必填项（'qclaw' 或 'workbuddy'）
+// 首次启动：提供凭证，连接成功后自动保存到 ~/.wechat-sdk/{mode}/session.json
 const sdk = new WeChatSDK({
-  mode: 'auto',
+  mode: 'qclaw',           // 必填 —— 'qclaw' 或 'workbuddy'
   credentials: {
-    mode: 'qclaw',          // 或 'workbuddy'
-    // ... 见下方"凭证快速参考"
+    mode: 'qclaw',
+    channelToken: '...',   // 见下方"凭证快速参考"
+    jwtToken: '...',
+    // guid 无需提供，SDK 自动生成
   },
 });
 
 await sdk.connect();
 
-// 后续启动：不传 credentials，SDK 自动从会话文件恢复
-// const sdk = new WeChatSDK();
+// 后续启动：只需指定 mode，SDK 自动从 ~/.wechat-sdk/qclaw/session.json 恢复凭证
+// const sdk = new WeChatSDK({ mode: 'qclaw' });
 // await sdk.connect();
 
 // 监听消息
@@ -106,12 +109,7 @@ sdk.on('message', (msg) => {
 });
 
 // 发送消息
-await sdk.sendMessage({
-  to: 'user_id',
-  content: '你好',
-});
-
-// 断开连接
+await sdk.sendMessage({ to: 'user_id', content: '你好' });
 await sdk.disconnect();
 ```
 
@@ -123,13 +121,13 @@ await sdk.disconnect();
 
 ```typescript
 const sdk = new WeChatSDK({
-  mode: 'qclaw',
+  mode: 'qclaw',           // ← 必填，决定存储路径（~/.wechat-sdk/qclaw/）
   credentials: {
-    mode: 'qclaw',           // ← 固定值
-    channelToken: '...',     // 扫码/JPRX 鉴权后获得
-    jwtToken: '...',         // 与 channelToken 同步返回
-    userId: '...',           // 可选，用户 ID
-    // guid 无需提供——SDK 自动生成并保存到 ~/.wechat-sdk/device.json（oicq 模式）
+    mode: 'qclaw',
+    channelToken: '...',   // 扫码/JPRX 鉴权后获得
+    jwtToken: '...',       // 与 channelToken 同步返回
+    userId: '...',         // 可选，用户 ID
+    // guid 无需提供——SDK 自动生成并保存到 ~/.wechat-sdk/qclaw/device.json（oicq 模式）
   },
 });
 ```
@@ -138,24 +136,31 @@ const sdk = new WeChatSDK({
 
 ```typescript
 const sdk = new WeChatSDK({
-  mode: 'workbuddy',
+  mode: 'workbuddy',       // ← 必填，决定存储路径（~/.wechat-sdk/workbuddy/）
   credentials: {
-    mode: 'workbuddy',       // ← 固定值
-    userId: '...',           // OAuth 返回的用户 ID
-    accessToken: '...',      // OAuth 访问令牌
-    refreshToken: '...',     // OAuth 刷新令牌（建议提供，用于自动刷新）
+    mode: 'workbuddy',
+    userId: '...',         // OAuth 返回的用户 ID
+    accessToken: '...',    // OAuth 访问令牌
+    refreshToken: '...',   // OAuth 刷新令牌（建议提供，用于自动刷新）
   },
 });
 ```
 
-#### 首次之后无需再传凭证
+#### 首次之后只需指定 mode
 
 ```typescript
-// connect() 自动从 ~/.wechat-sdk/session.json 恢复上次保存的凭证
-const sdk = new WeChatSDK();
+// mode 必填；credentials 可不传，SDK 自动从 ~/.wechat-sdk/{mode}/session.json 恢复
+const sdk = new WeChatSDK({ mode: 'qclaw' });
 await sdk.connect();
 
-// 需要重新登录时清除会话
+// 本地没有会话时触发 loginRequired 事件并抛出 LoginRequiredError
+sdk.on('loginRequired', ({ mode, ...rest }) => {
+  const guid = (rest as any).guid; // QClaw 模式携带自动生成的 guid
+  console.log(`需要登录 [${mode}]，guid=${guid ?? 'n/a'}`);
+  // 完成登录后提供凭证并重新 connect()
+});
+
+// 需要重新登录时清除会话（device.json 保留）
 await sdk.clearSession();
 ```
 

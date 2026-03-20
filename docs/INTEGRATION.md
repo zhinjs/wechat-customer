@@ -43,11 +43,26 @@ import { WeChatSDK } from 'wechat-sdk';
 
 ### 2. 初始化SDK
 
+`mode` 为必填项，不再有 `'auto'` 选项——这样 SDK 才能知道从哪个目录加载会话文件：
+
 ```typescript
+// QClaw 模式
 const sdk = new WeChatSDK({
-  mode: 'auto', // 自动选择合适的模式
+  mode: 'qclaw',     // 必填 —— 决定存储路径 ~/.wechat-sdk/qclaw/
+  credentials: {     // 可选 —— 不传则从 session.json 自动加载
+    mode: 'qclaw',
+    channelToken: '...',
+    jwtToken: '...',
+  },
+});
+
+// WorkBuddy 模式
+const sdk = new WeChatSDK({
+  mode: 'workbuddy', // 必填 —— 决定存储路径 ~/.wechat-sdk/workbuddy/
   credentials: {
-    // 凭证配置（见下面的模式特定配置）
+    mode: 'workbuddy',
+    userId: '...',
+    accessToken: '...',
   },
 });
 ```
@@ -159,12 +174,12 @@ await sdk.disconnect();
 SDK 内置了凭证持久化，**`connect()` 成功后自动保存，无需手动编写文件读写代码**。
 
 ```typescript
-// 首次运行 – 传入凭证，connect() 成功后自动写入 ~/.wechat-sdk/session.json
+// 首次运行 – 传入凭证，connect() 成功后自动写入 ~/.wechat-sdk/qclaw/session.json
 const sdk = new WeChatSDK({ mode: 'qclaw', credentials: { ... } });
 await sdk.connect();
 
-// 后续运行 – 不传凭证，SDK 自动从 session.json 恢复
-const sdk = new WeChatSDK();
+// 后续运行 – 只需指定 mode，凭证自动从 ~/.wechat-sdk/qclaw/session.json 恢复
+const sdk = new WeChatSDK({ mode: 'qclaw' });
 await sdk.connect();
 ```
 
@@ -267,9 +282,17 @@ SDK 内置凭证持久化机制，**大幅简化二次启动时的参数传递**
 
 | 时机 | 行为 |
 |------|------|
-| `connect()` 成功时 | 自动将凭证写入 `~/.wechat-sdk/session.json` |
+| `connect()` 成功时 | 自动将凭证写入 `~/.wechat-sdk/{mode}/session.json` |
 | `refreshCredentials()` 成功时 | 自动将刷新后的凭证更新到会话文件 |
-| 下次 `connect()` 且未传 `credentials` 时 | 自动从会话文件读取凭证，无需任何参数 |
+| 下次 `connect()` 且未传 `credentials` 时 | 自动从 `~/.wechat-sdk/{mode}/session.json` 读取凭证 |
+| 没有会话且没有凭证时 | 触发 `loginRequired` 事件，抛出 `LoginRequiredError` |
+
+各模式的会话文件独立存储，互不影响：
+
+| 模式 | 路径 |
+|------|------|
+| QClaw | `~/.wechat-sdk/qclaw/session.json`、`~/.wechat-sdk/qclaw/device.json` |
+| WorkBuddy | `~/.wechat-sdk/workbuddy/session.json` |
 
 ### 首次启动（提供凭证）
 
@@ -281,48 +304,60 @@ const sdk = new WeChatSDK({
   mode: 'qclaw',
   credentials: {
     mode: 'qclaw',
-    guid: process.env.QCLAW_GUID!,
     channelToken: process.env.QCLAW_CHANNEL_TOKEN!,
     jwtToken: process.env.QCLAW_JWT_TOKEN!,
+    // guid 无需提供，SDK 自动生成并保存到 device.json
   },
 });
 
 await sdk.connect();
-// 连接成功后，凭证自动保存到 ~/.wechat-sdk/session.json
+// 连接成功后，凭证自动保存到 ~/.wechat-sdk/qclaw/session.json
 console.log('首次连接成功，凭证已自动保存');
 ```
 
-### 后续启动（无需再传凭证）
+### 后续启动（只需指定 mode）
 
 ```typescript
 import { WeChatSDK } from 'wechat-sdk';
 
-// 后续启动：不传任何凭证
-const sdk = new WeChatSDK();
+// mode 必填，凭证自动从 ~/.wechat-sdk/{mode}/session.json 恢复
+const sdk = new WeChatSDK({ mode: 'qclaw' });
 await sdk.connect();
-// SDK 自动从 ~/.wechat-sdk/session.json 恢复凭证
 console.log('从会话文件恢复连接');
 ```
 
-### 启动时检查会话
+### 首次启动：loginRequired 事件
+
+本地没有会话时，SDK 触发 `loginRequired` 事件并抛出 `LoginRequiredError`：
 
 ```typescript
-import { WeChatSDK } from 'wechat-sdk';
+import { WeChatSDK, LoginRequiredError } from 'wechat-sdk';
 
-const sdk = new WeChatSDK();
+const sdk = new WeChatSDK({ mode: 'qclaw' });
 
-if (!(await sdk.hasSavedSession())) {
-  console.error('未找到会话，请先提供凭证运行一次');
-  process.exit(1);
+sdk.on('loginRequired', async (payload) => {
+  if (payload.mode === 'qclaw') {
+    // payload.guid 是自动生成的设备 GUID，供发起扫码登录
+    console.log('需要登录，设备 GUID:', payload.guid);
+    // 完成扫码登录，拿到 channelToken 和 jwtToken 后：
+    const { channelToken, jwtToken } = await doQClawLogin(payload.guid);
+    sdk.updateCredentials({ mode: 'qclaw', channelToken, jwtToken });
+    await sdk.connect(); // 重新连接，凭证会被保存
+  }
+});
+
+try {
+  await sdk.connect();
+} catch (e) {
+  if (!(e instanceof LoginRequiredError)) throw e;
+  // loginRequired 已处理，等待回调触发 connect()
 }
-
-await sdk.connect();
 ```
 
 ### 会话管理 API
 
 ```typescript
-// 检查会话文件是否存在
+// 检查会话文件是否存在 (~/.wechat-sdk/{mode}/session.json)
 const hasSession = await sdk.hasSavedSession(); // boolean
 
 // 读取已保存的凭证（不建立连接）
@@ -331,7 +366,7 @@ if (creds?.mode === 'qclaw') {
   console.log('设备 GUID:', creds.guid);
 }
 
-// 清除会话（下次需要重新提供凭证）
+// 清除会话（device.json 保留；下次需要重新提供 channelToken/jwtToken）
 await sdk.clearSession();
 ```
 
@@ -339,8 +374,9 @@ await sdk.clearSession();
 
 ```typescript
 const sdk = new WeChatSDK({
+  mode: 'qclaw',
   storage: {
-    dir: '~/.my-app/wechat',  // 默认 ~/.wechat-sdk
+    dir: '~/.my-app/wechat',  // 默认 ~/.wechat-sdk；实际路径为 {dir}/{mode}/
     enablePersist: true,       // 设为 false 完全禁用持久化
   },
 });

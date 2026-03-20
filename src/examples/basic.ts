@@ -6,12 +6,12 @@ import { WeChatSDK } from '../sdk/index.js';
 
 async function main() {
   const sdk = new WeChatSDK({
-    mode: 'auto',
+    mode: 'qclaw',
     credentials: {
       mode: 'qclaw',
-      guid: 'your-device-guid',
       channelToken: 'your-channel-token',
       jwtToken: 'your-jwt-token',
+      // guid is auto-generated on first run
     },
   });
 

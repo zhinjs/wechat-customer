@@ -19,12 +19,14 @@ import {
   QClawCredentials,
   WorkBuddyCredentials,
   EventListener,
+  LoginRequiredPayload,
 } from './types.js';
 import {
   WeChatSDKError,
   ConnectionError,
   ConfigurationError,
   ValidationError,
+  LoginRequiredError,
 } from './error.js';
 import { Channel } from './channels/base.js';
 import { QClawChannel } from './channels/qclaw/client.js';
@@ -32,11 +34,11 @@ import { WorkBuddyChannel } from './channels/workbuddy/client.js';
 import { Logger } from './utils/logger.js';
 import { Storage } from './utils/storage.js';
 
-/** Key used when persisting session credentials to the storage directory. */
+/** Key used when persisting session credentials to the mode-specific storage directory. */
 const SESSION_KEY = 'session';
 
 /**
- * Key used when persisting device-level info (guid) separately from auth tokens.
+ * Key used when persisting device-level info (guid) for QClaw.
  * Mirrors the oicq pattern: device.json never expires; session.json may be cleared on re-login.
  */
 const DEVICE_KEY = 'device';
@@ -44,22 +46,26 @@ const DEVICE_KEY = 'device';
 /**
  * WeChat 通信SDK
  * 
- * 统一的微信通信接口，同时支持QClaw和WorkBuddy两种通信方式。
+ * 统一的微信通信接口，支持 QClaw 和 WorkBuddy 两种通信方式。
+ * mode 为必填，会话凭证自动从 `~/.wechat-sdk/{mode}/session.json` 加载。
  * 
- * 使用示例：
+ * 首次启动示例（QClaw）：
  * ```typescript
- * const sdk = new WeChatSDK({
- *   mode: 'auto',
- *   credentials: { ... }
+ * const sdk = new WeChatSDK({ mode: 'qclaw' });
+ * 
+ * sdk.on('loginRequired', ({ guid }) => {
+ *   // 用 guid 发起扫码登录，拿到 channelToken/jwtToken 后：
+ *   sdk.updateCredentials({ mode: 'qclaw', channelToken, jwtToken });
+ *   sdk.connect();
  * });
  * 
- * await sdk.connect();
- * sdk.on('message', (msg) => {
- *   console.log('收到消息:', msg.content);
- * });
+ * await sdk.connect(); // 首次：触发 loginRequired；此后：自动从会话文件恢复
+ * ```
  * 
- * await sdk.sendMessage({ to: 'user_id', content: '你好' });
- * await sdk.disconnect();
+ * 二次启动示例：
+ * ```typescript
+ * const sdk = new WeChatSDK({ mode: 'qclaw' });
+ * await sdk.connect(); // 自动加载 ~/.wechat-sdk/qclaw/session.json
  * ```
  */
 export class WeChatSDK extends EventEmitter {
@@ -69,11 +75,13 @@ export class WeChatSDK extends EventEmitter {
   private isConnected = false;
   private storage: Storage;
   
-  constructor(config: SDKConfig = {}) {
+  constructor(config: SDKConfig) {
     super();
     this.config = this.normalizeConfig(config);
     this.logger = new Logger('WeChatSDK', this.config.logger);
-    this.storage = new Storage(this.config.storage.dir ?? '~/.wechat-sdk');
+    // Per-mode storage: ~/.wechat-sdk/qclaw/ or ~/.wechat-sdk/workbuddy/
+    const baseDir = this.config.storage.dir ?? '~/.wechat-sdk';
+    this.storage = new Storage(`${baseDir}/${this.config.mode}`);
     this.setupEventForwarding();
   }
 
@@ -83,12 +91,13 @@ export class WeChatSDK extends EventEmitter {
    * 连接到微信服务
    * 
    * 步骤：
-   * 1. 若未提供凭证，尝试从本地会话文件自动恢复
-   * 2. 验证配置和凭证
-   * 3. 选择合适的通信方式（如果是auto模式）
-   * 4. 创建平台特定的通道实例
-   * 5. 初始化和连接通道
-   * 6. 连接成功后将凭证持久化到本地（enablePersist=true时）
+   * 1. 若未提供凭证，尝试从本地会话文件自动恢复（~/.wechat-sdk/{mode}/session.json）
+   * 2. 若仍无凭证，触发 loginRequired 事件并抛出 LoginRequiredError
+   *    - QClaw：事件携带已生成的设备 GUID，供应用发起扫码登录
+   *    - WorkBuddy：事件携带 mode，应用自行发起 OAuth 流程
+   * 3. QClaw 模式：确保 guid 存在（自动生成并保存到 device.json）
+   * 4. 创建通道并连接
+   * 5. 连接成功后将凭证持久化到会话文件（enablePersist=true 时）
    */
   async connect(): Promise<void> {
     if (this.isConnected) {
@@ -97,9 +106,9 @@ export class WeChatSDK extends EventEmitter {
     }
 
     try {
-      this.logger.info('开始连接...');
+      this.logger.info('开始连接...', { mode: this.config.mode });
 
-      // 若未提供凭证，尝试从本地会话文件自动恢复
+      // 1. 若未提供凭证，尝试从本地会话文件自动恢复
       if (!this.config.credentials && this.config.storage.enablePersist) {
         const saved = await this.storage.load<ChannelCredentials>(SESSION_KEY);
         if (saved) {
@@ -108,30 +117,37 @@ export class WeChatSDK extends EventEmitter {
         }
       }
 
-      // 验证凭证
+      // 2. 仍无凭证 → 触发初始化流程
       if (!this.config.credentials) {
-        throw new ConfigurationError('缺少凭证配置，且未找到本地会话文件');
+        if (this.config.mode === 'qclaw') {
+          // 先确保 guid 存在，以便在事件中携带
+          const guid = await this.ensureDeviceGuid();
+          const payload: LoginRequiredPayload = { mode: 'qclaw', guid };
+          this.emit('loginRequired', payload);
+          throw new LoginRequiredError('qclaw', guid);
+        } else {
+          const payload: LoginRequiredPayload = { mode: 'workbuddy' };
+          this.emit('loginRequired', payload);
+          throw new LoginRequiredError('workbuddy');
+        }
       }
 
-      // QClaw 模式：确保设备 GUID 存在（参考 oicq 的 device.json 模式）
-      if ((this.config.credentials as QClawCredentials).mode === 'qclaw') {
+      // 3. QClaw：确保 guid 存在（可能已在凭证中，也可能需要从 device.json 加载/生成）
+      if (this.config.mode === 'qclaw') {
         this.config.credentials = await this.ensureDeviceInfo(
           this.config.credentials as QClawCredentials,
         );
       }
 
-      // 创建通道
+      // 4. 创建通道
       this.channel = this.createChannel();
-      if (!this.channel) {
-        throw new ConfigurationError('无法创建通道实例');
-      }
 
-      // 连接
+      // 5. 连接
       await this.channel.connect();
       this.isConnected = true;
       this.logger.info('连接成功');
 
-      // 连接成功后持久化凭证
+      // 6. 持久化凭证
       if (this.config.storage.enablePersist) {
         const creds = this.channel.getCredentials();
         await this.storage.save(SESSION_KEY, creds);
@@ -143,7 +159,9 @@ export class WeChatSDK extends EventEmitter {
       this.isConnected = false;
       this.logger.error('连接失败', error as Error);
       const sdkError = error instanceof Error ? error : new Error(String(error));
-      this.emit('error', sdkError);
+      if (!(error instanceof LoginRequiredError)) {
+        this.emit('error', sdkError);
+      }
       throw sdkError;
     }
   }
@@ -152,61 +170,25 @@ export class WeChatSDK extends EventEmitter {
    * 断开连接
    */
   async disconnect(): Promise<void> {
-    if (!this.isConnected) {
-      this.logger.warn('未连接，跳过断开连接');
+    if (!this.isConnected || !this.channel) {
       return;
     }
 
     try {
-      this.logger.info('开始断开连接...');
-      if (this.channel) {
-        await this.channel.disconnect();
-      }
+      await this.channel.disconnect();
       this.isConnected = false;
       this.logger.info('连接已断开');
       this.emit('disconnected', { reason: 'user' });
     } catch (error) {
-      this.logger.error('断开连接时出错', error as Error);
+      this.logger.error('断开连接失败', error as Error);
       throw error;
     }
-  }
-
-  /**
-   * 检查连接状态
-   */
-  isConnectedState(): boolean {
-    return this.isConnected && this.channel?.isConnected() === true;
-  }
-
-  /**
-   * 获取连接状态
-   */
-  getConnectionState(): ConnectionState {
-    return this.channel?.getState() ?? ConnectionState.DISCONNECTED;
   }
 
   // ────────────── 消息方法 ──────────────
 
   /**
    * 发送消息
-   * 
-   * @param request 消息请求
-   * @returns 发送响应
-   * 
-   * @example
-   * ```typescript
-   * const response = await sdk.sendMessage({
-   *   to: 'user123',
-   *   content: '你好，世界！',
-   *   type: MessageType.TEXT,
-   * });
-   * 
-   * if (response.success) {
-   *   console.log('消息已发送:', response.messageId);
-   * } else {
-   *   console.error('消息发送失败:', response.error);
-   * }
-   * ```
    */
   async sendMessage(request: SendMessageRequest): Promise<SendMessageResponse> {
     if (!this.channel) {
@@ -217,24 +199,30 @@ export class WeChatSDK extends EventEmitter {
       throw new ConnectionError('未连接到服务，请先调用 connect()');
     }
 
-    // 验证请求参数
     this.validateSendRequest(request);
 
     try {
-      this.logger.debug('发送消息', { to: request.to });
-      const response = await this.channel.sendMessage(request);
-      
-      if (response.success) {
-        this.logger.debug('消息发送成功', { messageId: response.messageId });
-      } else {
-        this.logger.warn('消息发送失败', { error: response.error });
-      }
-      
-      return response;
+      return await this.channel.sendMessage(request);
     } catch (error) {
-      this.logger.error('发送消息时出错', error as Error);
+      this.logger.error('发送消息失败', error as Error);
       throw error;
     }
+  }
+
+  // ────────────── 状态方法 ──────────────
+
+  /**
+   * 检查是否已连接
+   */
+  isConnectedState(): boolean {
+    return this.isConnected;
+  }
+
+  /**
+   * 获取连接状态
+   */
+  getConnectionState(): ConnectionState {
+    return this.channel?.getState() ?? ConnectionState.DISCONNECTED;
   }
 
   // ────────────── 凭证管理 ──────────────
@@ -251,11 +239,9 @@ export class WeChatSDK extends EventEmitter {
       this.logger.info('刷新凭证...');
       await this.channel.refreshCredentials();
       
-      // 更新本地配置中的凭证
       const updatedCreds = this.channel.getCredentials();
       this.config.credentials = updatedCreds;
 
-      // 持久化刷新后的凭证
       if (this.config.storage.enablePersist) {
         await this.storage.save(SESSION_KEY, updatedCreds);
         this.logger.debug('刷新后的凭证已保存');
@@ -278,12 +264,12 @@ export class WeChatSDK extends EventEmitter {
   /**
    * 更新凭证
    * 
-   * 用于在运行时更新凭证（例如刷新token）
+   * 用于在运行时更新凭证（例如首次登录拿到 token 后注入，或 token 刷新）。
+   * 不会触发网络请求，也不会自动持久化。
    */
   updateCredentials(credentials: ChannelCredentials): void {
     this.config.credentials = credentials;
     if (this.channel) {
-      // 通知通道更新凭证
       // 具体实现取决于通道类型
     }
   }
@@ -299,8 +285,6 @@ export class WeChatSDK extends EventEmitter {
 
   /**
    * 加载本地保存的会话凭证（不建立连接）
-   * 
-   * @returns 保存的凭证，若不存在则返回 null
    */
   async loadSavedCredentials(): Promise<ChannelCredentials | null> {
     return this.storage.load<ChannelCredentials>(SESSION_KEY);
@@ -309,7 +293,7 @@ export class WeChatSDK extends EventEmitter {
   /**
    * 清除本地保存的会话凭证
    * 
-   * 调用此方法后，下次启动时需要重新提供凭证。
+   * 下次启动时需要重新提供凭证。
    * 注意：设备 GUID（device.json）不会被清除，如需清除请调用 clearDevice()。
    */
   async clearSession(): Promise<void> {
@@ -317,17 +301,28 @@ export class WeChatSDK extends EventEmitter {
     this.logger.info('本地会话凭证已清除');
   }
 
-  // ────────────── 设备管理（QClaw） ──────────────
+  // ────────────── 设备管理（QClaw 专用） ──────────────
 
   /**
    * 检查是否存在本地持久化的设备信息（device.json）
    * 
-   * QClaw 模式专用。设备 GUID 与会话凭证分开存储：
-   * - device.json：设备 GUID，首次生成后永久保存，clearSession() 不会清除它
-   * - session.json：登录凭证（channelToken/jwtToken），可能过期，clearSession() 会清除
+   * QClaw 模式专用。device.json 与 session.json 分开：
+   * - device.json：设备 GUID，首次生成后永久保存，clearSession() 不清除
+   * - session.json：登录凭证（channelToken/jwtToken），可能过期
    */
   async hasSavedDevice(): Promise<boolean> {
     return this.storage.exists(DEVICE_KEY);
+  }
+
+  /**
+   * 获取或生成设备 GUID（QClaw 模式专用）
+   * 
+   * 可在调用 connect() 前用于获取设备标识，以发起扫码登录流程。
+   * - 若 device.json 已有 guid，直接返回
+   * - 若没有，生成新 UUID 并保存
+   */
+  async getOrCreateDeviceGuid(): Promise<string> {
+    return this.ensureDeviceGuid();
   }
 
   /**
@@ -345,25 +340,6 @@ export class WeChatSDK extends EventEmitter {
 
   /**
    * 监听SDK事件
-   * 
-   * @example
-   * ```typescript
-   * sdk.on('connected', () => {
-   *   console.log('已连接');
-   * });
-   * 
-   * sdk.on('disconnected', ({ reason }) => {
-   *   console.log('已断开:', reason);
-   * });
-   * 
-   * sdk.on('message', (msg) => {
-   *   console.log('收到消息:', msg.content);
-   * });
-   * 
-   * sdk.on('error', (error) => {
-   *   console.error('发生错误:', error);
-   * });
-   * ```
    */
   override on<K extends keyof SDKEventMap>(
     event: K,
@@ -372,9 +348,6 @@ export class WeChatSDK extends EventEmitter {
     return super.on(event, listener as any);
   }
 
-  /**
-   * 监听事件（仅一次）
-   */
   override once<K extends keyof SDKEventMap>(
     event: K,
     listener: EventListener<K>,
@@ -382,9 +355,6 @@ export class WeChatSDK extends EventEmitter {
     return super.once(event, listener as any);
   }
 
-  /**
-   * 移除事件监听
-   */
   override off<K extends keyof SDKEventMap>(
     event: K,
     listener: EventListener<K>,
@@ -399,7 +369,7 @@ export class WeChatSDK extends EventEmitter {
    */
   private normalizeConfig(config: SDKConfig): Required<SDKConfig> {
     return {
-      mode: config.mode ?? 'auto',
+      mode: config.mode,
       credentials: config.credentials as ChannelCredentials,
       connection: {
         timeout: config.connection?.timeout ?? 5000,
@@ -425,15 +395,13 @@ export class WeChatSDK extends EventEmitter {
    * 创建通道实例
    */
   private createChannel(): Channel {
-    const mode = this.selectMode();
+    const mode = this.config.mode;
     this.logger.info('创建通道', { mode });
 
     if (mode === 'qclaw') {
       return this.createQClawChannel();
-    } else if (mode === 'workbuddy') {
-      return this.createWorkBuddyChannel();
     } else {
-      throw new ConfigurationError(`不支持的通信模式: ${mode}`);
+      return this.createWorkBuddyChannel();
     }
   }
 
@@ -472,47 +440,6 @@ export class WeChatSDK extends EventEmitter {
   }
 
   /**
-   * 选择通信模式
-   */
-  private selectMode(): 'qclaw' | 'workbuddy' {
-    const configMode = this.config.mode;
-
-    if (configMode === 'auto') {
-      return this.autoSelectMode();
-    } else if (configMode === 'qclaw' || configMode === 'workbuddy') {
-      return configMode;
-    } else {
-      throw new ConfigurationError(`不支持的通信模式: ${configMode}`);
-    }
-  }
-
-  /**
-   * 自动选择最合适的通信模式
-   */
-  private autoSelectMode(): 'qclaw' | 'workbuddy' {
-    if (!this.config.credentials) {
-      throw new ConfigurationError('缺少凭证，无法自动选择通信模式');
-    }
-
-    const mode = (this.config.credentials as any).mode;
-    if (mode === 'qclaw' || mode === 'workbuddy') {
-      return mode;
-    }
-
-    // 根据凭证特征推断模式
-    const creds = this.config.credentials;
-    if ('channelToken' in creds && 'jwtToken' in creds) {
-      this.logger.debug('自动选择: QClaw模式（检测到channelToken和jwtToken）');
-      return 'qclaw';
-    } else if ('accessToken' in creds && 'userId' in creds) {
-      this.logger.debug('自动选择: WorkBuddy模式（检测到accessToken和userId）');
-      return 'workbuddy';
-    }
-
-    throw new ConfigurationError('无法从凭证推断通信模式，请指定mode或提供正确的凭证');
-  }
-
-  /**
    * 设置事件转发（将通道事件转发给SDK）
    */
   private setupEventForwarding(): void {
@@ -520,44 +447,44 @@ export class WeChatSDK extends EventEmitter {
   }
 
   /**
-   * 确保 QClaw 凭证中包含设备 GUID（oicq device.json 模式）
-   * 
-   * 处理逻辑：
-   * 1. 若凭证中已有 guid，持久化到 device.json 后直接使用（迁移已有设备 ID 的场景）
-   * 2. 若没有 guid，尝试从 device.json 加载（二次启动场景）
-   * 3. 若 device.json 也没有，自动生成一个新 UUID 并保存（首次启动场景）
-   * 
-   * device.json 与 session.json 分开存储：
-   * - device.json：设备标识，永久保存，clearSession() 不会清除
-   * - session.json：登录凭证，可能过期，clearSession() 会清除
+   * 获取或生成设备 GUID（QClaw 内部使用）
    */
-  private async ensureDeviceInfo(
-    creds: QClawCredentials,
-  ): Promise<QClawCredentials & { guid: string }> {
-    if (creds.guid) {
-      // guid 已提供 —— 将其持久化，保持 device.json 与运行时一致
-      if (this.config.storage.enablePersist) {
-        await this.storage.save(DEVICE_KEY, { guid: creds.guid });
-      }
-      return creds as QClawCredentials & { guid: string };
-    }
-
-    // 从 device.json 恢复（二次启动）
+  private async ensureDeviceGuid(): Promise<string> {
     if (this.config.storage.enablePersist) {
       const device = await this.storage.load<{ guid: string }>(DEVICE_KEY);
       if (device?.guid) {
-        this.logger.info('从设备文件恢复 GUID', { guid: device.guid });
-        return { ...creds, guid: device.guid };
+        return device.guid;
       }
     }
 
-    // 首次启动：自动生成并保存 GUID
     const { randomUUID } = await import('crypto');
     const guid = randomUUID();
     this.logger.info('首次运行，自动生成设备 GUID', { guid });
     if (this.config.storage.enablePersist) {
       await this.storage.save(DEVICE_KEY, { guid });
     }
+    return guid;
+  }
+
+  /**
+   * 确保 QClaw 凭证中包含设备 GUID（oicq device.json 模式）
+   * 
+   * 处理逻辑：
+   * 1. 若凭证中已有 guid，持久化到 device.json 后直接使用
+   * 2. 若没有 guid，通过 ensureDeviceGuid() 加载或生成
+   */
+  private async ensureDeviceInfo(
+    creds: QClawCredentials,
+  ): Promise<QClawCredentials & { guid: string }> {
+    if (creds.guid) {
+      if (this.config.storage.enablePersist) {
+        await this.storage.save(DEVICE_KEY, { guid: creds.guid });
+      }
+      return creds as QClawCredentials & { guid: string };
+    }
+
+    const guid = await this.ensureDeviceGuid();
+    this.logger.info('从设备文件恢复或生成 GUID', { guid });
     return { ...creds, guid };
   }
 

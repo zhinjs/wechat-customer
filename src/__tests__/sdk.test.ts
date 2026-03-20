@@ -1,4 +1,4 @@
-import { WeChatSDK } from '../sdk/index';
+import { WeChatSDK, LoginRequiredError } from '../sdk/index';
 import { QClawCredentials, WorkBuddyCredentials, ConnectionState } from '../sdk/types';
 
 // Mock the channel implementations
@@ -18,7 +18,7 @@ jest.mock('../sdk/channels/qclaw/client', () => ({
 }));
 
 jest.mock('../sdk/channels/workbuddy/client', () => ({
-  WorkBuddyChannel: jest.fn().mockImplementation(() => ({
+  WorkBuddyChannel: jest.fn().mockImplementation((creds) => ({
     on: jest.fn().mockReturnThis(),
     connect: jest.fn().mockResolvedValue(undefined),
     disconnect: jest.fn().mockResolvedValue(undefined),
@@ -26,7 +26,7 @@ jest.mock('../sdk/channels/workbuddy/client', () => ({
     getState: jest.fn().mockReturnValue(ConnectionState.CONNECTED),
     sendMessage: jest.fn().mockResolvedValue({ success: true, messageId: 'test-id', timestamp: Date.now() }),
     refreshCredentials: jest.fn().mockResolvedValue(undefined),
-    getCredentials: jest.fn().mockReturnValue({ mode: 'workbuddy', userId: 'user', accessToken: 'token' }),
+    getCredentials: jest.fn().mockReturnValue(creds),
     emit: jest.fn(),
     removeAllListeners: jest.fn(),
   })),
@@ -47,8 +47,13 @@ const workbuddyCreds: WorkBuddyCredentials = {
 
 describe('WeChatSDK', () => {
   describe('Configuration validation', () => {
-    it('should create SDK with default config', () => {
-      const sdk = new WeChatSDK();
+    it('should create SDK with QClaw mode', () => {
+      const sdk = new WeChatSDK({ mode: 'qclaw' });
+      expect(sdk).toBeDefined();
+    });
+
+    it('should create SDK with WorkBuddy mode', () => {
+      const sdk = new WeChatSDK({ mode: 'workbuddy' });
       expect(sdk).toBeDefined();
     });
 
@@ -64,29 +69,15 @@ describe('WeChatSDK', () => {
   });
 
   describe('Mode selection', () => {
-    it('should select qclaw mode when mode is qclaw', async () => {
+    it('should connect in qclaw mode', async () => {
       const sdk = new WeChatSDK({ mode: 'qclaw', credentials: qclawCreds });
       await sdk.connect();
       expect(sdk.isConnectedState()).toBe(true);
       await sdk.disconnect();
     });
 
-    it('should select workbuddy mode when mode is workbuddy', async () => {
+    it('should connect in workbuddy mode', async () => {
       const sdk = new WeChatSDK({ mode: 'workbuddy', credentials: workbuddyCreds });
-      await sdk.connect();
-      expect(sdk.isConnectedState()).toBe(true);
-      await sdk.disconnect();
-    });
-
-    it('should auto-select qclaw mode from credentials', async () => {
-      const sdk = new WeChatSDK({ mode: 'auto', credentials: qclawCreds });
-      await sdk.connect();
-      expect(sdk.isConnectedState()).toBe(true);
-      await sdk.disconnect();
-    });
-
-    it('should auto-select workbuddy mode from credentials', async () => {
-      const sdk = new WeChatSDK({ mode: 'auto', credentials: workbuddyCreds });
       await sdk.connect();
       expect(sdk.isConnectedState()).toBe(true);
       await sdk.disconnect();
@@ -109,14 +100,40 @@ describe('WeChatSDK', () => {
       await sdk.disconnect();
     });
 
-    it('should throw ConfigurationError when no credentials', async () => {
+    it('throws LoginRequiredError when no credentials and no saved session', async () => {
       const sdk = new WeChatSDK({ mode: 'qclaw', storage: { enablePersist: false } });
-      await expect(sdk.connect()).rejects.toThrow();
+      await expect(sdk.connect()).rejects.toThrow(LoginRequiredError);
     });
 
-    it('should throw ConfigurationError for unsupported mode', async () => {
-      const sdk = new WeChatSDK({ mode: 'auto', storage: { enablePersist: false } });
-      await expect(sdk.connect()).rejects.toThrow();
+    it('emits loginRequired event when no credentials (QClaw)', async () => {
+      const sdk = new WeChatSDK({ mode: 'qclaw', storage: { enablePersist: false } });
+      const loginRequiredSpy = jest.fn();
+      sdk.on('loginRequired', loginRequiredSpy);
+      await expect(sdk.connect()).rejects.toThrow(LoginRequiredError);
+      expect(loginRequiredSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ mode: 'qclaw', guid: expect.any(String) }),
+      );
+    });
+
+    it('emits loginRequired event when no credentials (WorkBuddy)', async () => {
+      const sdk = new WeChatSDK({ mode: 'workbuddy', storage: { enablePersist: false } });
+      const loginRequiredSpy = jest.fn();
+      sdk.on('loginRequired', loginRequiredSpy);
+      await expect(sdk.connect()).rejects.toThrow(LoginRequiredError);
+      expect(loginRequiredSpy).toHaveBeenCalledWith({ mode: 'workbuddy' });
+    });
+
+    it('LoginRequiredError carries mode and guid for QClaw', async () => {
+      const sdk = new WeChatSDK({ mode: 'qclaw', storage: { enablePersist: false } });
+      let caughtError: LoginRequiredError | undefined;
+      try {
+        await sdk.connect();
+      } catch (e) {
+        caughtError = e as LoginRequiredError;
+      }
+      expect(caughtError).toBeInstanceOf(LoginRequiredError);
+      expect(caughtError?.mode).toBe('qclaw');
+      expect(caughtError?.guid).toBeDefined();
     });
   });
 
@@ -172,11 +189,11 @@ describe('WeChatSDK', () => {
     });
 
     it('hasSavedSession returns false when no session file exists', async () => {
-      const sdk = new WeChatSDK({ storage: { dir: tmpDir, enablePersist: false } });
+      const sdk = new WeChatSDK({ mode: 'qclaw', storage: { dir: tmpDir, enablePersist: false } });
       expect(await sdk.hasSavedSession()).toBe(false);
     });
 
-    it('connect saves credentials to storage when enablePersist=true', async () => {
+    it('connect saves credentials to per-mode storage when enablePersist=true', async () => {
       const sdk = new WeChatSDK({
         mode: 'qclaw',
         credentials: qclawCreds,
@@ -190,6 +207,21 @@ describe('WeChatSDK', () => {
       await sdk.disconnect();
     });
 
+    it('QClaw and WorkBuddy sessions are stored independently', async () => {
+      const sdkQ = new WeChatSDK({ mode: 'qclaw', credentials: qclawCreds, storage: { dir: tmpDir, enablePersist: true } });
+      await sdkQ.connect();
+      await sdkQ.disconnect();
+
+      const sdkW = new WeChatSDK({ mode: 'workbuddy', credentials: workbuddyCreds, storage: { dir: tmpDir, enablePersist: true } });
+      await sdkW.connect();
+      await sdkW.disconnect();
+
+      // Clearing qclaw session does not affect workbuddy session
+      await sdkQ.clearSession();
+      expect(await sdkQ.hasSavedSession()).toBe(false);
+      expect(await sdkW.hasSavedSession()).toBe(true);
+    });
+
     it('connect does NOT save credentials when enablePersist=false', async () => {
       const sdk = new WeChatSDK({
         mode: 'qclaw',
@@ -201,7 +233,7 @@ describe('WeChatSDK', () => {
       await sdk.disconnect();
     });
 
-    it('connect restores credentials from storage when none provided', async () => {
+    it('connect restores credentials from per-mode storage when none provided', async () => {
       // First run – saves credentials
       const sdk1 = new WeChatSDK({
         mode: 'qclaw',
@@ -211,16 +243,16 @@ describe('WeChatSDK', () => {
       await sdk1.connect();
       await sdk1.disconnect();
 
-      // Second run – no credentials provided
-      const sdk2 = new WeChatSDK({ storage: { dir: tmpDir, enablePersist: true } });
+      // Second run – mode is still required, but no credentials needed
+      const sdk2 = new WeChatSDK({ mode: 'qclaw', storage: { dir: tmpDir, enablePersist: true } });
       await sdk2.connect();
       expect(sdk2.isConnectedState()).toBe(true);
       await sdk2.disconnect();
     });
 
-    it('connect throws when no credentials and no saved session', async () => {
-      const sdk = new WeChatSDK({ storage: { dir: tmpDir, enablePersist: true } });
-      await expect(sdk.connect()).rejects.toThrow();
+    it('throws LoginRequiredError when no credentials and no saved session', async () => {
+      const sdk = new WeChatSDK({ mode: 'qclaw', storage: { dir: tmpDir, enablePersist: true } });
+      await expect(sdk.connect()).rejects.toThrow(LoginRequiredError);
     });
 
     it('clearSession removes the session file', async () => {
@@ -267,8 +299,16 @@ describe('WeChatSDK', () => {
     });
 
     it('hasSavedDevice returns false before first connect', async () => {
-      const sdk = new WeChatSDK({ storage: { dir: tmpDir, enablePersist: true } });
+      const sdk = new WeChatSDK({ mode: 'qclaw', storage: { dir: tmpDir, enablePersist: true } });
       expect(await sdk.hasSavedDevice()).toBe(false);
+    });
+
+    it('getOrCreateDeviceGuid generates a guid before connect', async () => {
+      const sdk = new WeChatSDK({ mode: 'qclaw', storage: { dir: tmpDir, enablePersist: true } });
+      const guid = await sdk.getOrCreateDeviceGuid();
+      expect(typeof guid).toBe('string');
+      expect(guid.length).toBeGreaterThan(0);
+      expect(await sdk.hasSavedDevice()).toBe(true);
     });
 
     it('auto-generates guid on first connect when not provided', async () => {
@@ -276,7 +316,6 @@ describe('WeChatSDK', () => {
         mode: 'qclaw',
         channelToken: 'test-token',
         jwtToken: 'test-jwt',
-        // no guid
       };
       const sdk = new WeChatSDK({
         mode: 'qclaw',
@@ -284,7 +323,6 @@ describe('WeChatSDK', () => {
         storage: { dir: tmpDir, enablePersist: true },
       });
       await sdk.connect();
-      // device.json should now exist with a generated guid
       expect(await sdk.hasSavedDevice()).toBe(true);
       await sdk.disconnect();
     });
@@ -296,44 +334,27 @@ describe('WeChatSDK', () => {
         jwtToken: 'test-jwt',
       };
 
-      // First connect – guid is generated
       const sdk1 = new WeChatSDK({
         mode: 'qclaw',
         credentials: credsWithoutGuid,
         storage: { dir: tmpDir, enablePersist: true },
       });
       await sdk1.connect();
-      const creds1 = sdk1.getCredentials() as QClawCredentials;
-      const generatedGuid = creds1.guid;
+      const generatedGuid = (sdk1.getCredentials() as QClawCredentials).guid;
       expect(generatedGuid).toBeDefined();
       await sdk1.disconnect();
 
-      // Second connect – same guid should be restored from device.json
       const sdk2 = new WeChatSDK({
         mode: 'qclaw',
         credentials: credsWithoutGuid,
         storage: { dir: tmpDir, enablePersist: true },
       });
       await sdk2.connect();
-      const creds2 = sdk2.getCredentials() as QClawCredentials;
-      expect(creds2.guid).toBe(generatedGuid);
+      expect((sdk2.getCredentials() as QClawCredentials).guid).toBe(generatedGuid);
       await sdk2.disconnect();
     });
 
     it('uses provided guid and persists it to device.json', async () => {
-      const sdk = new WeChatSDK({
-        mode: 'qclaw',
-        credentials: qclawCreds, // qclawCreds has guid: 'test-guid'
-        storage: { dir: tmpDir, enablePersist: true },
-      });
-      await sdk.connect();
-      expect(await sdk.hasSavedDevice()).toBe(true);
-      const creds = sdk.getCredentials() as QClawCredentials;
-      expect(creds.guid).toBe('test-guid');
-      await sdk.disconnect();
-    });
-
-    it('clearDevice removes the device.json but not session.json', async () => {
       const sdk = new WeChatSDK({
         mode: 'qclaw',
         credentials: qclawCreds,
@@ -341,11 +362,19 @@ describe('WeChatSDK', () => {
       });
       await sdk.connect();
       expect(await sdk.hasSavedDevice()).toBe(true);
-      expect(await sdk.hasSavedSession()).toBe(true);
+      expect((sdk.getCredentials() as QClawCredentials).guid).toBe('test-guid');
+      await sdk.disconnect();
+    });
 
+    it('clearDevice removes device.json but not session.json', async () => {
+      const sdk = new WeChatSDK({
+        mode: 'qclaw',
+        credentials: qclawCreds,
+        storage: { dir: tmpDir, enablePersist: true },
+      });
+      await sdk.connect();
       await sdk.clearDevice();
       expect(await sdk.hasSavedDevice()).toBe(false);
-      // clearDevice() does NOT touch session.json
       expect(await sdk.hasSavedSession()).toBe(true);
       await sdk.disconnect();
     });
@@ -358,19 +387,13 @@ describe('WeChatSDK', () => {
       });
       await sdk.connect();
       await sdk.clearSession();
-      // device.json should still be there after clearing the session
       expect(await sdk.hasSavedDevice()).toBe(true);
     });
 
     it('does not persist device when enablePersist=false', async () => {
-      const credsWithoutGuid: QClawCredentials = {
-        mode: 'qclaw',
-        channelToken: 'test-token',
-        jwtToken: 'test-jwt',
-      };
       const sdk = new WeChatSDK({
         mode: 'qclaw',
-        credentials: credsWithoutGuid,
+        credentials: { mode: 'qclaw', channelToken: 'test-token', jwtToken: 'test-jwt' },
         storage: { dir: tmpDir, enablePersist: false },
       });
       await sdk.connect();

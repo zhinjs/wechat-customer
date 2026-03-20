@@ -106,3 +106,29 @@ export class ValidationError extends WeChatSDKError {
     Object.setPrototypeOf(this, ValidationError.prototype);
   }
 }
+
+/**
+ * 需要登录错误
+ * 
+ * 当 SDK 在本地找不到会话文件且未提供凭证时抛出。
+ * 同时会触发 SDK 的 `loginRequired` 事件。
+ * 
+ * 对于 QClaw 模式，错误中包含已生成的设备 GUID，供应用用于发起扫码登录。
+ */
+export class LoginRequiredError extends WeChatSDKError {
+  readonly mode: 'qclaw' | 'workbuddy';
+  /** QClaw 模式下已生成的设备 GUID */
+  readonly guid?: string;
+
+  constructor(mode: 'qclaw' | 'workbuddy', guid?: string) {
+    const message =
+      mode === 'qclaw'
+        ? `QClaw 登录需要凭证，设备 GUID: ${guid}。请完成扫码登录后携带 channelToken/jwtToken 重新调用 connect()。`
+        : 'WorkBuddy 登录需要凭证，请完成 OAuth 授权后携带 userId/accessToken 重新调用 connect()。';
+    super('LOGIN_REQUIRED', message, mode === 'qclaw' ? { guid } : undefined);
+    this.name = 'LoginRequiredError';
+    this.mode = mode;
+    this.guid = guid;
+    Object.setPrototypeOf(this, LoginRequiredError.prototype);
+  }
+}

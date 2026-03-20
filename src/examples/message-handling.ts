@@ -10,9 +10,9 @@ async function handleMessages() {
     mode: 'qclaw',
     credentials: {
       mode: 'qclaw',
-      guid: 'your-guid',
       channelToken: 'your-token',
       jwtToken: 'your-jwt',
+      // guid is auto-generated and persisted on first run
     },
   });
 
