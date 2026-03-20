@@ -10,6 +10,8 @@
 4. [错误类型](#错误类型)
 5. [事件](#事件)
 
+> 凭证字段说明、获取方式及会话持久化完整指南请查看 [凭证指南](CREDENTIALS.md)。
+
 ## WeChatSDK 类
 
 SDK的主要入口类，提供所有与微信通信的API。
@@ -229,6 +231,60 @@ sdk.updateCredentials({
   accessToken: 'new_token',
   refreshToken: 'new_refresh_token',
 });
+```
+
+---
+
+### 会话管理方法
+
+SDK 内置了凭证持久化机制，首次连接后自动将凭证写入 `~/.wechat-sdk/session.json`，后续启动时无需再传凭证。
+
+> 详细使用说明见 [凭证指南](CREDENTIALS.md)。
+
+#### `hasSavedSession(): Promise<boolean>`
+
+检查是否存在本地保存的会话凭证。
+
+**返回值:** `true` 表示会话文件存在，可以无凭证启动；`false` 表示需要首次传入凭证。
+
+**示例:**
+```typescript
+const hasSession = await sdk.hasSavedSession();
+if (!hasSession) {
+  console.log('首次启动，请提供凭证');
+}
+```
+
+---
+
+#### `loadSavedCredentials(): Promise<ChannelCredentials | null>`
+
+读取已保存的凭证，**不**建立连接。适用于调试或在连接前检查凭证内容。
+
+**返回值:** 保存的凭证对象，若会话文件不存在则返回 `null`。
+
+**示例:**
+```typescript
+const creds = await sdk.loadSavedCredentials();
+if (creds) {
+  console.log('已保存的会话模式:', creds.mode);
+  if (creds.mode === 'qclaw') {
+    console.log('设备 GUID:', creds.guid);
+  }
+}
+```
+
+---
+
+#### `clearSession(): Promise<void>`
+
+删除本地会话文件。调用后下次启动必须重新提供凭证。
+
+**示例:**
+```typescript
+// 登出或需要重新登录时调用
+await sdk.clearSession();
+console.log('会话已清除，下次启动需要重新提供凭证');
 ```
 
 ---

@@ -85,16 +85,20 @@ yarn add @myorg/wechat-sdk
 ```typescript
 import { WeChatSDK } from '@myorg/wechat-sdk';
 
-// 初始化 SDK（自动选择最佳模式）
+// 首次启动：提供凭证，连接成功后自动保存到 ~/.wechat-sdk/session.json
 const sdk = new WeChatSDK({
-  mode: 'auto', // 'auto' | 'qclaw' | 'workbuddy'
+  mode: 'auto',
   credentials: {
-    // 凭证配置（见集成指南）
+    mode: 'qclaw',          // 或 'workbuddy'
+    // ... 见下方"凭证快速参考"
   },
 });
 
-// 连接
 await sdk.connect();
+
+// 后续启动：不传 credentials，SDK 自动从会话文件恢复
+// const sdk = new WeChatSDK();
+// await sdk.connect();
 
 // 监听消息
 sdk.on('message', (msg) => {
@@ -111,38 +115,55 @@ await sdk.sendMessage({
 await sdk.disconnect();
 ```
 
-### 3. 选择通信方式
+### 3. 凭证快速参考
 
-#### QClaw 模式（推荐用于内部应用）
+> 详细说明（字段含义、获取方式、会话持久化）请查看 [凭证指南](docs/CREDENTIALS.md)。
+
+#### QClaw 模式（WebSocket + JPRX 网关）
 
 ```typescript
 const sdk = new WeChatSDK({
   mode: 'qclaw',
   credentials: {
-    guid: 'device_guid',
-    channelToken: 'your_token',
-    jwtToken: 'your_jwt',
+    mode: 'qclaw',           // ← 固定值
+    guid: 'device_guid',     // 设备唯一标识，首次生成后固定（crypto.randomUUID()）
+    channelToken: '...',     // 扫码/JPRX 鉴权后获得
+    jwtToken: '...',         // 与 channelToken 同步返回
+    userId: '...',           // 可选，用户 ID
   },
 });
 ```
 
-#### WorkBuddy 模式（推荐用于生产环境）
+#### WorkBuddy 模式（Centrifuge + HTTP）
 
 ```typescript
 const sdk = new WeChatSDK({
   mode: 'workbuddy',
   credentials: {
-    userId: 'your_user_id',
-    accessToken: 'your_access_token',
-    refreshToken: 'your_refresh_token',
+    mode: 'workbuddy',       // ← 固定值
+    userId: '...',           // OAuth 返回的用户 ID
+    accessToken: '...',      // OAuth 访问令牌
+    refreshToken: '...',     // OAuth 刷新令牌（建议提供，用于自动刷新）
   },
 });
+```
+
+#### 首次之后无需再传凭证
+
+```typescript
+// connect() 自动从 ~/.wechat-sdk/session.json 恢复上次保存的凭证
+const sdk = new WeChatSDK();
+await sdk.connect();
+
+// 需要重新登录时清除会话
+await sdk.clearSession();
 ```
 
 ## 📚 文档指南
 
 | 文档 | 内容 |
 |------|------|
+| [凭证指南](docs/CREDENTIALS.md) | 凭证字段说明、获取方式、会话持久化完整指南 |
 | [API文档](docs/API.md) | 完整的API参考 |
 | [集成指南](docs/INTEGRATION.md) | 详细的集成步骤 |
 | [架构设计](docs/ARCHITECTURE.md) | SDK设计和实现细节 |
