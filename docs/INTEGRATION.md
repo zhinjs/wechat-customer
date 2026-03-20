@@ -8,9 +8,10 @@
 2. [基础设置](#基础设置)
 3. [QClaw模式集成](#qclaw模式集成)
 4. [WorkBuddy模式集成](#workbuddy模式集成)
-5. [通用API](#通用api)
-6. [错误处理](#错误处理)
-7. [高级功能](#高级功能)
+5. [会话持久化与凭证恢复](#会话持久化与凭证恢复)
+6. [通用API](#通用api)
+7. [错误处理](#错误处理)
+8. [高级功能](#高级功能)
 
 ## 安装
 
@@ -42,11 +43,26 @@ import { WeChatSDK } from 'wechat-sdk';
 
 ### 2. 初始化SDK
 
+`mode` 为必填项，不再有 `'auto'` 选项——这样 SDK 才能知道从哪个目录加载会话文件：
+
 ```typescript
+// QClaw 模式
 const sdk = new WeChatSDK({
-  mode: 'auto', // 自动选择合适的模式
+  mode: 'qclaw',     // 必填 —— 决定存储路径 ~/.wechat-sdk/qclaw/
+  credentials: {     // 可选 —— 不传则从 session.json 自动加载
+    mode: 'qclaw',
+    channelToken: '...',
+    jwtToken: '...',
+  },
+});
+
+// WorkBuddy 模式
+const sdk = new WeChatSDK({
+  mode: 'workbuddy', // 必填 —— 决定存储路径 ~/.wechat-sdk/workbuddy/
   credentials: {
-    // 凭证配置（见下面的模式特定配置）
+    mode: 'workbuddy',
+    userId: '...',
+    accessToken: '...',
   },
 });
 ```
@@ -155,38 +171,19 @@ await sdk.disconnect();
 
 ### 凭证持久化
 
-建议将凭证保存到安全的存储中：
+SDK 内置了凭证持久化，**`connect()` 成功后自动保存，无需手动编写文件读写代码**。
 
 ```typescript
-import fs from 'fs';
-import path from 'path';
+// 首次运行 – 传入凭证，connect() 成功后自动写入 ~/.wechat-sdk/qclaw/session.json
+const sdk = new WeChatSDK({ mode: 'qclaw', credentials: { ... } });
+await sdk.connect();
 
-// 保存凭证
-function saveCredentials(creds) {
-  const dir = path.join(process.env.HOME, '.config', 'wechat-sdk');
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  
-  fs.writeFileSync(
-    path.join(dir, 'qclaw.json'),
-    JSON.stringify(creds, null, 2),
-    { mode: 0o600 } // 仅所有者可读写
-  );
-}
-
-// 加载凭证
-function loadCredentials() {
-  const dir = path.join(process.env.HOME, '.config', 'wechat-sdk');
-  const filePath = path.join(dir, 'qclaw.json');
-  
-  if (fs.existsSync(filePath)) {
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-  }
-  
-  return null;
-}
+// 后续运行 – 只需指定 mode，凭证自动从 ~/.wechat-sdk/qclaw/session.json 恢复
+const sdk = new WeChatSDK({ mode: 'qclaw' });
+await sdk.connect();
 ```
+
+详细说明见[会话持久化与凭证恢复](#会话持久化与凭证恢复)章节。
 
 ## WorkBuddy模式集成
 
@@ -276,6 +273,118 @@ try {
 // 6. 断开连接
 await sdk.disconnect();
 ```
+
+## 会话持久化与凭证恢复
+
+SDK 内置凭证持久化机制，**大幅简化二次启动时的参数传递**。
+
+### 工作原理
+
+| 时机 | 行为 |
+|------|------|
+| `connect()` 成功时 | 自动将凭证写入 `~/.wechat-sdk/{mode}/session.json` |
+| `refreshCredentials()` 成功时 | 自动将刷新后的凭证更新到会话文件 |
+| 下次 `connect()` 且未传 `credentials` 时 | 自动从 `~/.wechat-sdk/{mode}/session.json` 读取凭证 |
+| 没有会话且没有凭证时 | 触发 `loginRequired` 事件，抛出 `LoginRequiredError` |
+
+各模式的会话文件独立存储，互不影响：
+
+| 模式 | 路径 |
+|------|------|
+| QClaw | `~/.wechat-sdk/qclaw/session.json`、`~/.wechat-sdk/qclaw/device.json` |
+| WorkBuddy | `~/.wechat-sdk/workbuddy/session.json` |
+
+### 首次启动（提供凭证）
+
+```typescript
+import { WeChatSDK } from 'wechat-sdk';
+
+// 第一次运行：提供完整凭证（QClaw 示例）
+const sdk = new WeChatSDK({
+  mode: 'qclaw',
+  credentials: {
+    mode: 'qclaw',
+    channelToken: process.env.QCLAW_CHANNEL_TOKEN!,
+    jwtToken: process.env.QCLAW_JWT_TOKEN!,
+    // guid 无需提供，SDK 自动生成并保存到 device.json
+  },
+});
+
+await sdk.connect();
+// 连接成功后，凭证自动保存到 ~/.wechat-sdk/qclaw/session.json
+console.log('首次连接成功，凭证已自动保存');
+```
+
+### 后续启动（只需指定 mode）
+
+```typescript
+import { WeChatSDK } from 'wechat-sdk';
+
+// mode 必填，凭证自动从 ~/.wechat-sdk/{mode}/session.json 恢复
+const sdk = new WeChatSDK({ mode: 'qclaw' });
+await sdk.connect();
+console.log('从会话文件恢复连接');
+```
+
+### 首次启动：loginRequired 事件
+
+本地没有会话时，SDK 触发 `loginRequired` 事件并抛出 `LoginRequiredError`：
+
+```typescript
+import { WeChatSDK, LoginRequiredError } from 'wechat-sdk';
+
+const sdk = new WeChatSDK({ mode: 'qclaw' });
+
+sdk.on('loginRequired', async (payload) => {
+  if (payload.mode === 'qclaw') {
+    // payload.guid 是自动生成的设备 GUID，供发起扫码登录
+    console.log('需要登录，设备 GUID:', payload.guid);
+    // 完成扫码登录，拿到 channelToken 和 jwtToken 后：
+    const { channelToken, jwtToken } = await doQClawLogin(payload.guid);
+    sdk.updateCredentials({ mode: 'qclaw', channelToken, jwtToken });
+    await sdk.connect(); // 重新连接，凭证会被保存
+  }
+});
+
+try {
+  await sdk.connect();
+} catch (e) {
+  if (!(e instanceof LoginRequiredError)) throw e;
+  // loginRequired 已处理，等待回调触发 connect()
+}
+```
+
+### 会话管理 API
+
+```typescript
+// 检查会话文件是否存在 (~/.wechat-sdk/{mode}/session.json)
+const hasSession = await sdk.hasSavedSession(); // boolean
+
+// 读取已保存的凭证（不建立连接）
+const creds = await sdk.loadSavedCredentials(); // ChannelCredentials | null
+if (creds?.mode === 'qclaw') {
+  console.log('设备 GUID:', creds.guid);
+}
+
+// 清除会话（device.json 保留；下次需要重新提供 channelToken/jwtToken）
+await sdk.clearSession();
+```
+
+### 自定义存储目录
+
+```typescript
+const sdk = new WeChatSDK({
+  mode: 'qclaw',
+  storage: {
+    dir: '~/.my-app/wechat',  // 默认 ~/.wechat-sdk；实际路径为 {dir}/{mode}/
+    enablePersist: true,       // 设为 false 完全禁用持久化
+  },
+});
+```
+
+> 凭证字段说明和获取方式请查看 [凭证指南](CREDENTIALS.md)。
+
+---
 
 ## 通用API
 

@@ -10,6 +10,8 @@
 4. [错误类型](#错误类型)
 5. [事件](#事件)
 
+> 凭证字段说明、获取方式及会话持久化完整指南请查看 [凭证指南](CREDENTIALS.md)。
+
 ## WeChatSDK 类
 
 SDK的主要入口类，提供所有与微信通信的API。
@@ -230,6 +232,72 @@ sdk.updateCredentials({
   refreshToken: 'new_refresh_token',
 });
 ```
+
+---
+
+### 会话管理方法
+
+SDK 内置了凭证持久化机制。**`mode` 必填**，决定存储路径（`~/.wechat-sdk/{mode}/`）。凭证自动从 `{mode}/session.json` 加载，本地没有时触发 `loginRequired` 事件。
+
+> 详细使用说明见 [凭证指南](CREDENTIALS.md)。
+
+#### `hasSavedSession(): Promise<boolean>`
+
+检查 `~/.wechat-sdk/{mode}/session.json` 是否存在。
+
+```typescript
+const hasSession = await sdk.hasSavedSession();
+if (!hasSession) {
+  console.log('无本地会话，等待 loginRequired 事件');
+}
+```
+
+---
+
+#### `loadSavedCredentials(): Promise<ChannelCredentials | null>`
+
+读取已保存的凭证，**不**建立连接。
+
+```typescript
+const creds = await sdk.loadSavedCredentials();
+if (creds?.mode === 'qclaw') {
+  console.log('设备 GUID:', creds.guid);
+}
+```
+
+---
+
+#### `clearSession(): Promise<void>`
+
+删除 `{mode}/session.json`，**不**删除 `device.json`（设备 GUID 保留）。
+
+```typescript
+await sdk.clearSession(); // 登出；下次需重新提供 channelToken/jwtToken
+```
+
+---
+
+#### `hasSavedDevice(): Promise<boolean>`
+
+检查 `~/.wechat-sdk/{mode}/device.json` 是否存在（QClaw 专用）。
+
+---
+
+#### `getOrCreateDeviceGuid(): Promise<string>`
+
+获取或生成设备 GUID（QClaw 专用）。可在 `connect()` 前调用以获取 GUID，用于发起扫码登录流程。
+
+```typescript
+const sdk = new WeChatSDK({ mode: 'qclaw' });
+const guid = await sdk.getOrCreateDeviceGuid(); // 已有则加载，无则生成
+// 用 guid 请求 JPRX 鉴权接口，扫码后获取 channelToken/jwtToken
+```
+
+---
+
+#### `clearDevice(): Promise<void>`
+
+删除 `{mode}/device.json`（下次 QClaw 连接会生成新 GUID）。慎用，相当于"换设备"。
 
 ---
 
@@ -561,6 +629,37 @@ sdk.on('tokenRefreshed', () => {
 
 ---
 
+#### `loginRequired`
+
+本地没有会话文件时触发，让应用发起各自的登录流程。QClaw 模式携带自动生成的设备 GUID。
+
+```typescript
+import { WeChatSDK, LoginRequiredError } from 'wechat-sdk';
+
+const sdk = new WeChatSDK({ mode: 'qclaw' });
+
+sdk.on('loginRequired', async (payload) => {
+  if (payload.mode === 'qclaw') {
+    // payload.guid 是 SDK 自动生成的设备 GUID
+    const { channelToken, jwtToken } = await doQClawLogin(payload.guid);
+    sdk.updateCredentials({ mode: 'qclaw', channelToken, jwtToken });
+    await sdk.connect(); // 提供凭证后重新连接
+  } else if (payload.mode === 'workbuddy') {
+    const { userId, accessToken } = await doOAuthLogin();
+    sdk.updateCredentials({ mode: 'workbuddy', userId, accessToken });
+    await sdk.connect();
+  }
+});
+
+try {
+  await sdk.connect();
+} catch (e) {
+  if (!(e instanceof LoginRequiredError)) throw e;
+}
+```
+
+---
+
 ## 完整使用流程
 
 ```typescript
@@ -569,21 +668,25 @@ import {
   MessageType,
   ConnectionError,
   TokenExpiredError,
+  LoginRequiredError,
 } from 'wechat-sdk';
 
 async function main() {
-  // 1. 创建SDK实例
+  // 1. 创建SDK实例（mode 必填）
   const sdk = new WeChatSDK({
-    mode: 'auto',
-    credentials: {
-      mode: 'qclaw', // 或 'workbuddy'
-      // ... 其他凭证
-    },
+    mode: 'qclaw',
+    // credentials 可不传，自动从 ~/.wechat-sdk/qclaw/session.json 加载
   });
 
   // 2. 设置事件监听
   sdk.on('connected', () => {
     console.log('✓ 已连接');
+  });
+
+  sdk.on('loginRequired', async ({ mode, ...rest }) => {
+    const guid = (rest as any).guid as string | undefined;
+    console.log(`需要登录 [${mode}], guid=${guid ?? 'n/a'}`);
+    // 触发各自的登录流程，完成后 updateCredentials + connect()
   });
 
   sdk.on('message', async (message) => {

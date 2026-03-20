@@ -4,9 +4,9 @@
  */
 
 /**
- * 支持的通信模式
+ * 支持的通信模式（必须显式指定）
  */
-export type CommunicationMode = 'qclaw' | 'workbuddy' | 'auto';
+export type CommunicationMode = 'qclaw' | 'workbuddy';
 
 /**
  * 连接状态
@@ -129,6 +129,15 @@ export interface SendMessageResponse {
 }
 
 /**
+ * loginRequired 事件的载荷
+ * 
+ * 当 SDK 启动但未找到本地会话时发出，应用需根据 mode 触发对应的登录流程。
+ */
+export type LoginRequiredPayload =
+  | { mode: 'qclaw'; guid: string }   // 提供 guid 供应用发起扫码登录
+  | { mode: 'workbuddy' };             // 应用需发起 OAuth 授权
+
+/**
  * SDK事件映射
  */
 export interface SDKEventMap {
@@ -138,6 +147,11 @@ export interface SDKEventMap {
   'error': Error;
   'tokenRefreshed': void;
   'reconnecting': { attempt: number; nextRetryIn: number };
+  /**
+   * 需要登录 —— 本地没有会话文件时触发。
+   * 应用监听此事件后，完成各自的登录流程，然后携带凭证重新调用 connect()。
+   */
+  'loginRequired': LoginRequiredPayload;
 }
 
 /**
@@ -149,10 +163,19 @@ export type EventListener<K extends keyof SDKEventMap> = (data: SDKEventMap[K]) 
  * 核心SDK配置
  */
 export interface SDKConfig {
-  /** 通信模式 */
-  mode?: CommunicationMode;
+  /**
+   * 通信模式（必填）
+   * - 'qclaw'：通过微信 JPRX 网关（WebSocket）通信
+   * - 'workbuddy'：通过 CodeBuddy Centrifuge + HTTP 通信
+   */
+  mode: CommunicationMode;
   
-  /** 凭证信息 */
+  /**
+   * 凭证信息（可选，自动从本地会话文件加载）
+   * 
+   * 不传时 SDK 自动读取 `~/.wechat-sdk/{mode}/session.json`。
+   * 若本地也没有会话，则触发 `loginRequired` 事件并抛出 `LoginRequiredError`。
+   */
   credentials?: ChannelCredentials;
   
   /** 连接配置 */
@@ -178,8 +201,14 @@ export type ChannelCredentials = QClawCredentials | WorkBuddyCredentials;
 export interface QClawCredentials {
   mode: 'qclaw';
   
-  /** 设备GUID */
-  guid: string;
+  /**
+   * 设备GUID（可选）
+   * 
+   * 无需手动提供——SDK 会在首次连接时自动生成一个 UUID 并持久化到
+   * `~/.wechat-sdk/device.json`，后续启动自动加载，行为与 oicq 的 device.json 一致。
+   * 仅在需要迁移已有设备标识时才需要显式传入。
+   */
+  guid?: string;
   
   /** 渠道Token */
   channelToken: string;

@@ -83,18 +83,25 @@ yarn add @myorg/wechat-sdk
 ### 2. 基础使用
 
 ```typescript
-import { WeChatSDK } from '@myorg/wechat-sdk';
+import { WeChatSDK, LoginRequiredError } from '@myorg/wechat-sdk';
 
-// 初始化 SDK（自动选择最佳模式）
+// mode 是必填项（'qclaw' 或 'workbuddy'）
+// 首次启动：提供凭证，连接成功后自动保存到 ~/.wechat-sdk/{mode}/session.json
 const sdk = new WeChatSDK({
-  mode: 'auto', // 'auto' | 'qclaw' | 'workbuddy'
+  mode: 'qclaw',           // 必填 —— 'qclaw' 或 'workbuddy'
   credentials: {
-    // 凭证配置（见集成指南）
+    mode: 'qclaw',
+    channelToken: '...',   // 见下方"凭证快速参考"
+    jwtToken: '...',
+    // guid 无需提供，SDK 自动生成
   },
 });
 
-// 连接
 await sdk.connect();
+
+// 后续启动：只需指定 mode，SDK 自动从 ~/.wechat-sdk/qclaw/session.json 恢复凭证
+// const sdk = new WeChatSDK({ mode: 'qclaw' });
+// await sdk.connect();
 
 // 监听消息
 sdk.on('message', (msg) => {
@@ -102,47 +109,66 @@ sdk.on('message', (msg) => {
 });
 
 // 发送消息
-await sdk.sendMessage({
-  to: 'user_id',
-  content: '你好',
-});
-
-// 断开连接
+await sdk.sendMessage({ to: 'user_id', content: '你好' });
 await sdk.disconnect();
 ```
 
-### 3. 选择通信方式
+### 3. 凭证快速参考
 
-#### QClaw 模式（推荐用于内部应用）
+> 详细说明（字段含义、获取方式、会话持久化）请查看 [凭证指南](docs/CREDENTIALS.md)。
+
+#### QClaw 模式（WebSocket + JPRX 网关）
 
 ```typescript
 const sdk = new WeChatSDK({
-  mode: 'qclaw',
+  mode: 'qclaw',           // ← 必填，决定存储路径（~/.wechat-sdk/qclaw/）
   credentials: {
-    guid: 'device_guid',
-    channelToken: 'your_token',
-    jwtToken: 'your_jwt',
+    mode: 'qclaw',
+    channelToken: '...',   // 扫码/JPRX 鉴权后获得
+    jwtToken: '...',       // 与 channelToken 同步返回
+    userId: '...',         // 可选，用户 ID
+    // guid 无需提供——SDK 自动生成并保存到 ~/.wechat-sdk/qclaw/device.json（oicq 模式）
   },
 });
 ```
 
-#### WorkBuddy 模式（推荐用于生产环境）
+#### WorkBuddy 模式（Centrifuge + HTTP）
 
 ```typescript
 const sdk = new WeChatSDK({
-  mode: 'workbuddy',
+  mode: 'workbuddy',       // ← 必填，决定存储路径（~/.wechat-sdk/workbuddy/）
   credentials: {
-    userId: 'your_user_id',
-    accessToken: 'your_access_token',
-    refreshToken: 'your_refresh_token',
+    mode: 'workbuddy',
+    userId: '...',         // OAuth 返回的用户 ID
+    accessToken: '...',    // OAuth 访问令牌
+    refreshToken: '...',   // OAuth 刷新令牌（建议提供，用于自动刷新）
   },
 });
+```
+
+#### 首次之后只需指定 mode
+
+```typescript
+// mode 必填；credentials 可不传，SDK 自动从 ~/.wechat-sdk/{mode}/session.json 恢复
+const sdk = new WeChatSDK({ mode: 'qclaw' });
+await sdk.connect();
+
+// 本地没有会话时触发 loginRequired 事件并抛出 LoginRequiredError
+sdk.on('loginRequired', ({ mode, ...rest }) => {
+  const guid = (rest as any).guid; // QClaw 模式携带自动生成的 guid
+  console.log(`需要登录 [${mode}]，guid=${guid ?? 'n/a'}`);
+  // 完成登录后提供凭证并重新 connect()
+});
+
+// 需要重新登录时清除会话（device.json 保留）
+await sdk.clearSession();
 ```
 
 ## 📚 文档指南
 
 | 文档 | 内容 |
 |------|------|
+| [凭证指南](docs/CREDENTIALS.md) | 凭证字段说明、获取方式、会话持久化完整指南 |
 | [API文档](docs/API.md) | 完整的API参考 |
 | [集成指南](docs/INTEGRATION.md) | 详细的集成步骤 |
 | [架构设计](docs/ARCHITECTURE.md) | SDK设计和实现细节 |
