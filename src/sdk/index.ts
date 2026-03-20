@@ -30,6 +30,10 @@ import { Channel } from './channels/base.js';
 import { QClawChannel } from './channels/qclaw/client.js';
 import { WorkBuddyChannel } from './channels/workbuddy/client.js';
 import { Logger } from './utils/logger.js';
+import { Storage } from './utils/storage.js';
+
+/** Key used when persisting session credentials to the storage directory. */
+const SESSION_KEY = 'session';
 
 /**
  * WeChat 通信SDK
@@ -57,11 +61,13 @@ export class WeChatSDK extends EventEmitter {
   private channel: Channel | null = null;
   private logger: Logger;
   private isConnected = false;
+  private storage: Storage;
   
   constructor(config: SDKConfig = {}) {
     super();
     this.config = this.normalizeConfig(config);
     this.logger = new Logger('WeChatSDK', this.config.logger);
+    this.storage = new Storage(this.config.storage.dir ?? '~/.wechat-sdk');
     this.setupEventForwarding();
   }
 
@@ -71,10 +77,12 @@ export class WeChatSDK extends EventEmitter {
    * 连接到微信服务
    * 
    * 步骤：
-   * 1. 验证配置和凭证
-   * 2. 选择合适的通信方式（如果是auto模式）
-   * 3. 创建平台特定的通道实例
-   * 4. 初始化和连接通道
+   * 1. 若未提供凭证，尝试从本地会话文件自动恢复
+   * 2. 验证配置和凭证
+   * 3. 选择合适的通信方式（如果是auto模式）
+   * 4. 创建平台特定的通道实例
+   * 5. 初始化和连接通道
+   * 6. 连接成功后将凭证持久化到本地（enablePersist=true时）
    */
   async connect(): Promise<void> {
     if (this.isConnected) {
@@ -85,9 +93,18 @@ export class WeChatSDK extends EventEmitter {
     try {
       this.logger.info('开始连接...');
 
+      // 若未提供凭证，尝试从本地会话文件自动恢复
+      if (!this.config.credentials && this.config.storage.enablePersist) {
+        const saved = await this.storage.load<ChannelCredentials>(SESSION_KEY);
+        if (saved) {
+          this.logger.info('从本地会话文件恢复凭证');
+          this.config.credentials = saved;
+        }
+      }
+
       // 验证凭证
       if (!this.config.credentials) {
-        throw new ConfigurationError('缺少凭证配置');
+        throw new ConfigurationError('缺少凭证配置，且未找到本地会话文件');
       }
 
       // 创建通道
@@ -100,6 +117,14 @@ export class WeChatSDK extends EventEmitter {
       await this.channel.connect();
       this.isConnected = true;
       this.logger.info('连接成功');
+
+      // 连接成功后持久化凭证
+      if (this.config.storage.enablePersist) {
+        const creds = this.channel.getCredentials();
+        await this.storage.save(SESSION_KEY, creds);
+        this.logger.debug('会话凭证已保存');
+      }
+
       this.emit('connected');
     } catch (error) {
       this.isConnected = false;
@@ -202,7 +227,7 @@ export class WeChatSDK extends EventEmitter {
   // ────────────── 凭证管理 ──────────────
 
   /**
-   * 刷新凭证（如token过期）
+   * 刷新凭证（如token过期），刷新后自动持久化
    */
   async refreshCredentials(): Promise<void> {
     if (!this.channel) {
@@ -216,6 +241,12 @@ export class WeChatSDK extends EventEmitter {
       // 更新本地配置中的凭证
       const updatedCreds = this.channel.getCredentials();
       this.config.credentials = updatedCreds;
+
+      // 持久化刷新后的凭证
+      if (this.config.storage.enablePersist) {
+        await this.storage.save(SESSION_KEY, updatedCreds);
+        this.logger.debug('刷新后的凭证已保存');
+      }
       
       this.logger.info('凭证已刷新');
     } catch (error) {
@@ -242,6 +273,34 @@ export class WeChatSDK extends EventEmitter {
       // 通知通道更新凭证
       // 具体实现取决于通道类型
     }
+  }
+
+  // ────────────── 会话管理 ──────────────
+
+  /**
+   * 检查是否存在本地保存的会话凭证
+   */
+  async hasSavedSession(): Promise<boolean> {
+    return this.storage.exists(SESSION_KEY);
+  }
+
+  /**
+   * 加载本地保存的会话凭证（不建立连接）
+   * 
+   * @returns 保存的凭证，若不存在则返回 null
+   */
+  async loadSavedCredentials(): Promise<ChannelCredentials | null> {
+    return this.storage.load<ChannelCredentials>(SESSION_KEY);
+  }
+
+  /**
+   * 清除本地保存的会话凭证
+   * 
+   * 调用此方法后，下次启动时需要重新提供凭证。
+   */
+  async clearSession(): Promise<void> {
+    await this.storage.delete(SESSION_KEY);
+    this.logger.info('本地会话凭证已清除');
   }
 
   // ────────────── 事件方法 ──────────────
@@ -445,3 +504,4 @@ export * from './types.js';
 export * from './error.js';
 export { Logger } from './utils/logger.js';
 export { Channel } from './channels/base.js';
+export { Storage } from './utils/storage.js';

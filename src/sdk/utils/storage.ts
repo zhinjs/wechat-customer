@@ -1,11 +1,22 @@
 import * as fs from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
+
+/**
+ * Resolve leading `~` in a directory path to the user's home directory.
+ */
+function resolveDir(dir: string): string {
+  if (dir === '~' || dir.startsWith('~/') || dir.startsWith('~\\')) {
+    return path.join(os.homedir(), dir.slice(1));
+  }
+  return dir;
+}
 
 export class Storage {
   private dir: string;
 
   constructor(dir: string) {
-    this.dir = dir;
+    this.dir = resolveDir(dir);
   }
 
   private keyPath(key: string): string {
