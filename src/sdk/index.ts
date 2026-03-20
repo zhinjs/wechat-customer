@@ -27,6 +27,8 @@ import {
   ValidationError,
 } from './error.js';
 import { Channel } from './channels/base.js';
+import { QClawChannel } from './channels/qclaw/client.js';
+import { WorkBuddyChannel } from './channels/workbuddy/client.js';
 import { Logger } from './utils/logger.js';
 
 /**
@@ -301,7 +303,7 @@ export class WeChatSDK extends EventEmitter {
   private normalizeConfig(config: SDKConfig): Required<SDKConfig> {
     return {
       mode: config.mode ?? 'auto',
-      credentials: config.credentials,
+      credentials: config.credentials as ChannelCredentials,
       connection: {
         timeout: config.connection?.timeout ?? 5000,
         reconnectInterval: config.connection?.reconnectInterval ?? 3000,
@@ -348,9 +350,9 @@ export class WeChatSDK extends EventEmitter {
    */
   private createQClawChannel(): Channel {
     const creds = this.config.credentials as QClawCredentials;
-    // TODO: 实现QClawChannel
-    // return new QClawChannel(creds, this.config.connection, this.config.message, this.config.logger);
-    throw new Error('QClaw通道还未实现');
+    const channel = new QClawChannel(creds, this.config.connection, this.config.message, this.config.logger);
+    this.setupChannelEvents(channel);
+    return channel;
   }
 
   /**
@@ -358,9 +360,23 @@ export class WeChatSDK extends EventEmitter {
    */
   private createWorkBuddyChannel(): Channel {
     const creds = this.config.credentials as WorkBuddyCredentials;
-    // TODO: 实现WorkBuddyChannel
-    // return new WorkBuddyChannel(creds, this.config.connection, this.config.message, this.config.logger);
-    throw new Error('WorkBuddy通道还未实现');
+    const channel = new WorkBuddyChannel(creds, this.config.connection, this.config.message, this.config.logger);
+    this.setupChannelEvents(channel);
+    return channel;
+  }
+
+  /**
+   * 设置通道事件转发
+   */
+  private setupChannelEvents(channel: Channel): void {
+    channel.on('connected', () => this.emit('connected'));
+    channel.on('disconnected', (reason) => {
+      this.isConnected = false;
+      this.emit('disconnected', { reason });
+    });
+    channel.on('message', (msg) => this.emit('message', msg));
+    channel.on('error', (err) => this.emit('error', err));
+    channel.on('tokenRefreshed', () => this.emit('tokenRefreshed'));
   }
 
   /**
@@ -408,10 +424,7 @@ export class WeChatSDK extends EventEmitter {
    * 设置事件转发（将通道事件转发给SDK）
    */
   private setupEventForwarding(): void {
-    // 这个方法在实际实现时会连接通道事件到SDK事件
-    // this.on('channel:connected', () => this.emit('connected'));
-    // this.on('channel:disconnected', (reason) => this.emit('disconnected', reason));
-    // 等等
+    // Channel events are forwarded via setupChannelEvents() when a channel is created
   }
 
   /**

@@ -254,7 +254,7 @@ export abstract class Channel extends EventEmitter implements IChannel {
    * @protected
    */
   protected updateCredentials(partial: Partial<ChannelCredentials>): void {
-    this.credentials = { ...this.credentials, ...partial };
+    this.credentials = { ...this.credentials, ...partial } as ChannelCredentials;
   }
   
   /**
